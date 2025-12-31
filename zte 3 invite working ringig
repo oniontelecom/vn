@@ -1,4 +1,3 @@
-
 #!KAMAILIO
 #
 # Kamailio SIP Server v5.5 - default configuration script
@@ -685,21 +684,10 @@ route[RELAY] {
 #   M
 # Virtual number Service
 
+
+
 route[VIRTUAL_NUMBER] {
     xlog("L_INFO", "=== VIRTUAL_NUMBER ROUTE ENTERED ===\n");
-
-    # -------- ZTE RETRANSMISSION HANDLING (FIRST THING) --------
-    if (is_method("INVITE")) {
-        # Check if this is a retransmission
-        if ($ru =~ "^tel:" || $fU == "") {
-            if (t_precheck_trans()) {
-                xlog("L_INFO", "ZTE retransmission detected, using existing transaction\n");
-                t_check_trans();
-                exit;
-            }
-        }
-        t_check_trans();
-    }
 
     # -------- CANCEL HANDLING --------
     if (is_method("CANCEL")) {
@@ -729,102 +717,114 @@ route[VIRTUAL_NUMBER] {
         return;
     }
 
-    # -------- ZTE TEL URI FIX --------
-    if ($ru =~ "^tel:" || $fU == "") {
-        xlog("L_INFO", "ZTE-style INVITE detected – normalizing headers\n");
-        
-        # Store ZTE info for later use
-        $var(is_zte_call) = 1;
-        $var(zte_src_ip) = $si;
-        $var(zte_src_port) = $sp;
 
-        # --- ZTE SDP ADJUSTMENT ---
-        if (has_body("application/sdp")) {
-            xlog("L_INFO", "Adjusting SDP for ZTE codecs\n");
-            # Keep AMR 97–100, GSM-HR 101, PCMU 0, PCMA 8
-            sdp_keep_codecs_by_id("97,98,99,100,101,0,8");
-            xlog("L_INFO", "SDP adjusted for ZTE: AMR + GSM-HR + PCMU/PCMA\n");
-        }
+    # --------------------- ADDDEDDDDDDDDDDDD---------------------
 
-        # Extract numbers
-        $var(zte_from) = $(hdr(From){re.subst,/^.*(tel:|sip:)([0-9+]+).*/\2/});
-        $var(zte_to)   = $(ru{re.subst,/^tel:([0-9+]+)/\1/});
+        # -------- ZTE TEL URI FIX (DO NOT TOUCH HUAWEI) --------
 
-        # Fallback safety
-        if ($var(zte_from) == "") {
-            xlog("L_ERR", "ZTE INVITE without valid From number\n");
-            sl_send_reply("400", "Invalid From");
-            exit;
-        }
+    # -------- ZTE TEL COMPATIBILITY FIX (DO NOT TOUCH HUAWEI LOGIC) --------
+# -------- ZTE NORMALIZATION (EARLY) --------
+if ($ru =~ "^tel:" || $fU == "") {
+    xlog("L_INFO", "ZTE-style INVITE detected – normalizing headers\n");
 
-        # Store ZTE response destination
-        $var(zte_response_dest) = "sip:" + $var(zte_from) + "@" + $si + ":" + $sp + ";transport=udp";
-        xlog("L_INFO", "ZTE response destination: $var(zte_response_dest)\n");
-
-        # Normalize R-URI
-        $ru = "sip:" + $var(zte_to) + "@10.0.144.2;user=phone";
-
-        # Rebuild From (VALID TAG) - store tag for later
-        $var(zte_original_tag) = $(hdr(From){param.value,tag});
-        if ($var(zte_original_tag) == "") {
-            $var(zte_original_tag) = "zvn$Ts";
-        }
-        
-        remove_hf("From");
-        append_hf("From: <sip:$var(zte_from)@10.0.144.2>;tag=$var(zte_original_tag)\r\n");
-
-        # Rebuild To
-        remove_hf("To");
-        append_hf("To: <sip:$var(zte_to)@10.0.144.2;user=phone>\r\n");
-
-        # Contact (important for Huawei interop)
-        remove_hf("Contact");
-        append_hf("Contact: <sip:$var(zte_from)@10.0.144.2:5060>\r\n");
-
-        msg_apply_changes();
+       # --- ADD SDP ADJUSTMENT HERE ---
+    if (has_body("application/sdp")) {
+        xlog("L_INFO", "Adjusting SDP for ZTE codecs\n");
+        # Keep AMR 97–100, GSM-HR 101, PCMU 0, PCMA 8
+        sdp_keep_codecs_by_id("97,98,99,100,101,0,8");
+        xlog("L_INFO", "SDP adjusted for ZTE: AMR + GSM-HR + PCMU/PCMA\n");
     }
+    # --- END SDP ADJUSTMENT ---
 
-    xlog("L_INFO", "INVITE from $si:$sp | From: $fU | To: $rU\n");
+    # Extract numbers
+    $var(zte_from) = $(hdr(From){re.subst,/^.*(tel:|sip:)([0-9+]+).*/\2/});
+    $var(zte_to)   = $(ru{re.subst,/^tel:([0-9+]+)/\1/});
 
-    # -------- CHECK ALLOWED NUMBERS - DROP OTHERS --------
-    if ($fU != "981397013" && $fU != "942202093" && $fU != "930076185" && 
-        $fU != "924783562" && $fU != "917836919" && $fU != "911400315" && 
-        $fU != "936413021" && $fU != "912228110" && $fU != "911053597" && 
-        $fU != "920966130") {
-
-        xlog("L_WARN", "DROPPING CALL: Calling number $fU not in allowed list\n");
-
-        # -------- STATEFUL 403 RESPONSE --------
-        if (!t_newtran()) {
-            sl_reply_error();  # fallback if transaction creation fails
-            exit;
-        }
-
-        t_reply("403", "Caller Not Authorized");
+    # Fallback safety
+    if ($var(zte_from) == "") {
+        xlog("L_ERR", "ZTE INVITE without valid From number\n");
+        sl_send_reply("400", "Invalid From");
         exit;
     }
 
-    # -------- SDP FIX FOR HUAWEI (SKIP FOR ZTE) --------
-    if (has_body("application/sdp")) {
-        # Only apply Huawei SDP filtering if it's NOT a ZTE call
-        if (!($var(is_zte_call) == 1)) {
-            xlog("L_INFO", "Fixing Huawei SDP - removing AMR codecs\n");
-            
-            # Remove AMR codecs by ID: 108, 102, 100, 96, 107, 116
-            if (sdp_remove_codecs_by_id("108,102,100,96,107,116")) {
-                xlog("L_INFO", "Removed AMR codecs 108,102,100,96,107,116\n");
-            }
+    # Normalize R-URI
+    $ru = "sip:" + $var(zte_to) + "@10.0.144.2;user=phone";
 
-            # Keep only PCMU(0) and PCMA(8)
-            if (sdp_keep_codecs_by_id("0,8")) {
-                xlog("L_INFO", "Kept only PCMU(0) and PCMA(8)\n");
-            }
-        } else {
-            xlog("L_INFO", "Skipping Huawei SDP filtering for ZTE call\n");
-        }
+    # Rebuild From (VALID TAG)
+    remove_hf("From");
+    append_hf("From: <sip:$var(zte_from)@10.0.144.2>;tag=zvn$Ts\r\n");
+
+    # Rebuild To
+    remove_hf("To");
+    append_hf("To: <sip:$var(zte_to)@10.0.144.2;user=phone>\r\n");
+
+    # Contact (important for Huawei interop)
+    remove_hf("Contact");
+    append_hf("Contact: <sip:$var(zte_from)@10.0.144.2:5060>\r\n");
+
+    msg_apply_changes();
+
+}
+
+
+
+
+    xlog("L_INFO", "INVITE from $si:$sp | From: $fU | To: $rU\n");
+
+
+
+     # -------- CHECK ALLOWED NUMBERS - DROP OTHERS --------
+   # -------- CHECK ALLOWED NUMBERS - DROP OTHERS --------
+if ($fU != "981397013" && $fU != "942202093" && $fU != "930076185" &&
+    $fU != "924783562" && $fU != "917836919" && $fU != "911400315" &&
+    $fU != "936413021" && $fU != "912228110" && $fU != "911053597" &&
+    $fU != "920966130") {
+
+    xlog("L_WARN", "DROPPING CALL: Calling number $fU not in allowed list\n");
+
+    # -------- STATEFUL 403 RESPONSE --------
+    if (!t_newtran()) {
+        sl_reply_error();  # fallback if transaction creation fails
+        exit;
     }
 
-    # -------- Huawei GSMC DESTINATION --------
+    t_reply("403", "Caller Not Authorized");
+    exit;  # exits the route after blocking
+}
+
+
+
+
+#251917836919,251911400315,251936413021 911053597
+
+      # -------- SDP part --------
+# -------- FIX HUAWEI SDP --------# -------- CREATE SMALL SDP LIKE GMSC --------
+# -------- DELAYED OFFER --------
+    #if (has_body("application/sdp")) {
+      #  remove_body();
+   # }
+
+# Add this right after the SDP section
+
+
+# -------- CLEAN SDP FOR VPN --------# -------- CORRECT SDP FIX FOR HUAWEI --------
+# -------- SDP FIX FOR HUAWEI --------
+if (has_body("application/sdp")) {
+    xlog("L_INFO", "Fixing Huawei SDP - removing AMR codecs\n");
+
+    # Remove AMR codecs by ID: 108, 102, 100, 96, 107, 116
+    if (sdp_remove_codecs_by_id("108,102,100,96,107,116")) {
+        xlog("L_INFO", "Removed AMR codecs 108,102,100,96,107,116\n");
+    }
+
+    # Keep only PCMU(0) and PCMA(8)
+    if (sdp_keep_codecs_by_id("0,8")) {
+        xlog("L_INFO", "Kept only PCMU(0) and PCMA(8)\n");
+    }
+}
+
+
+    # -------- GSMC DESTINATION --------
     $var(gsmc_ip)   = "10.189.18.133";
     $var(gsmc_port) = "5060";
 
@@ -842,59 +842,64 @@ route[VIRTUAL_NUMBER] {
     remove_hf("To");
     insert_hf("To: $var(new_to)\r\n", "Call-ID");
 
-    # -------- FETCH VIRTUAL NUMBER --------
-    $var(db_msisdn) = "251" + $fU;
-    xlog("L_INFO", "Looking up msisdn: $var(db_msisdn)\n");
+    # -------- A-PARTY --------# -------- FETCH VIRTUAL NUMBER FROM DATABASE --------
+# -------- FETCH VIRTUAL NUMBER FROM DATABASE ----# -------- FETCH VIRTUAL NUMBER FROM DATABASE --------
+# -------- FETCH VIRTUAL NUMBER FROM DATABASE --------
+# -------- FETCH VIRTUAL NUMBER --------
+# -------- FETCH VIRTUAL NUMBER --------
 
-    sql_query("ca",
-        "SELECT default_vsim FROM ussd_user_default WHERE msisdn = '$var(db_msisdn)'",
-        "ra");
+$var(db_msisdn) = "251" + $fU;
+xlog("L_INFO", "Looking up msisdn: $var(db_msisdn)\n");
 
-    if ($dbr(ra=>rows) > 0) {
-        $var(virtual_a) = $dbr(ra=>[0,0]);
-        xlog("L_INFO", "Found virtual number: $var(virtual_a)\n");
-    } else {
-        xlog("L_ERR", "No virtual number found for: $var(db_msisdn)\n");
-        sl_send_reply("404", "Virtual Number Not Found");
-        exit;
-    }
+sql_query("ca",
+    "SELECT default_vsim FROM ussd_user_default WHERE msisdn = '$var(db_msisdn)'",
+    "ra");
 
-    # -------- FROM REWRITE (DIFFERENT FOR ZTE vs HUAWEI) --------
-    if ($var(virtual_a) != "") {
-        # For ZTE calls, preserve the original ZTE format
-        if ($var(is_zte_call) == 1) {
-            # Extract current tag
-            $var(current_tag) = $(hdr(From){param.value,tag});
-            if ($var(current_tag) == "") {
-                $var(current_tag) = $var(zte_original_tag);
-            }
-            
-            # Rebuild From with virtual number but keep ZTE format
-            remove_hf("From");
-            append_hf("From: <sip:$var(virtual_a)@10.0.144.2>;tag=$var(current_tag)\r\n");
-            xlog("L_INFO", "Rewrote ZTE From header to virtual number: $var(virtual_a) with tag: $var(current_tag)\n");
-        } else {
-            # For Huawei calls, use standard uac_replace_from
-            uac_replace_from("$var(virtual_a)", "sip:$var(virtual_a)@$fd");
-            xlog("L_INFO", "Rewrote From header to virtual number: $var(virtual_a)\n");
-        }
-    }
+if ($dbr(ra=>rows) > 0) {
+    $var(virtual_a) = $dbr(ra=>[0,0]);
+    xlog("L_INFO", "Found virtual number: $var(virtual_a)\n");
+} else {
+    xlog("L_ERR", "No virtual number found for: $var(db_msisdn)\n");
+    sl_send_reply("404", "Virtual Number Not Found");
+    exit;
+}
 
-    # -------- P-ASSERTED-IDENTITY --------
-    remove_hf("P-Asserted-Identity");
-    insert_hf("P-Asserted-Identity: <tel:$var(virtual_a)>\r\n", "From");
+
+
+    # -------- GENERATE NEW CALL-ID --------
+    #$var(new_callid) = "VN-" + $ci;
+    #remove_hf("Call-ID");
+    #insert_hf("Call-ID: $var(new_callid)\r\n");
+
 
     # -------- ROUTING --------
     $ru = "sip:" + $var(real_b) + "@" + $var(gsmc_ip) + ":" + $var(gsmc_port) + ";user=phone";
-    
-    # For ZTE calls, store Huawei destination separately
-    if ($var(is_zte_call) == 1) {
-        $var(huawei_dest) = $ru;
-        # Responses will go to ZTE, requests to Huawei
-        $du = $ru;
-    } else {
-        $du = $ru;
+    $du = $ru;
+
+    # -------- SEND 100 TRYING --------
+
+    # sl_send_reply("100", "Trying");
+
+
+
+
+
+
+    # -------- FROM REWRITE --------
+       # -------- FROM REWRITE --------
+    # Always rewrite From header with virtual number from database
+    if ($var(virtual_a) != "") {
+        uac_replace_from("$var(virtual_a)", "sip:$var(virtual_a)@$fd");
+        xlog("L_INFO", "Rewrote From header to virtual number: $var(virtual_a)\n");
     }
+
+    # -------- P-ASSERTED-IDENTITY --------
+    #remove_hf("P-Asserted-Identity");
+    #insert_hf("P-Asserted-Identity: \"$var(virtual_a)\" <sip:$var(virtual_a)@$fd>\r\n", "From");
+
+    # Tel version
+    remove_hf("P-Asserted-Identity");
+    insert_hf("P-Asserted-Identity: <tel:$var(virtual_a)>\r\n", "From");
 
     # -------- MAX-FORWARDS --------
     mf_process_maxfwd_header("10");
@@ -904,21 +909,26 @@ route[VIRTUAL_NUMBER] {
     record_route();
 
     # -------- CREATE TRANSACTION --------
-    if (!t_newtran()) {
-        sl_reply_error();
-        exit;
-    }
+if (!t_newtran()) {
+    sl_reply_error();
+    exit;
+}
 
-    # -------- SET HANDLERS --------
-    t_on_reply("VN_REPLY_ROUTE");
-    t_on_failure("VN_FAILURE_ROUTE");
+# -------- SET HANDLERS --------
+t_on_reply("VN_REPLY_ROUTE");
+t_on_failure("VN_FAILURE_ROUTE");
+
 
     xlog("L_INFO", "FORWARDING INVITE → $ru | CLI will be: $var(virtual_a)\n");
 
+
+    #---------------- added sicnewe are prxy
+
     # Remove 100rel support
-    remove_hf("Supported");
-    remove_hf("Require");
-    append_hf("Supported: replaces, timer\r\n");
+remove_hf("Supported");
+remove_hf("Require");
+append_hf("Supported: replaces, timer\r\n");
+
 
     # -------- RELAY --------
     if (!t_relay()) {
@@ -927,16 +937,11 @@ route[VIRTUAL_NUMBER] {
     exit;
 }
 
+
 # +++++++++++++++++++++++===== HANDLE REPLIES =====++++++++++++++++++++++
 
 onreply_route[VN_REPLY_ROUTE] {
     xlog("L_INFO", "VN_REPLY_ROUTE: Status $rs $rr\n");
-
-    # For ZTE calls, force response to go back to ZTE
-    if ($var(zte_response_dest) != "") {
-        $du = $var(zte_response_dest);
-        xlog("L_INFO", "Redirecting $rs response directly to ZTE: $du\n");
-    }
 
     # Handle reliable provisional responses (100rel)
     if (status =~ "1[0-9][0-9]") {
@@ -956,11 +961,6 @@ onreply_route[VN_REPLY_ROUTE] {
     # For 2xx responses (success)
     if (status =~ "2[0-9][0-9]") {
         xlog("L_INFO", "Success response $rs received\n");
-        
-        # Store final response for ACK handling
-        if ($var(zte_response_dest) != "") {
-            $avp(zte_final_response) = 1;
-        }
     }
 
     # Route through NAT handling if needed
@@ -970,16 +970,12 @@ onreply_route[VN_REPLY_ROUTE] {
     xlog("L_INFO", "Forwarding $rs $rr response upstream\n");
 }
 
-# -------------------- Handle failures for virtual number calls ---------------------
+
+
+# -------------------- Handle failures for virtual number calls   ---------------------
 
 failure_route[VN_FAILURE_ROUTE] {
     xlog("L_INFO", "VN_FAILURE_ROUTE: Status $rs, Reason: $rr\n");
-
-    # For ZTE calls, force failure response to go back to ZTE
-    if ($var(zte_response_dest) != "") {
-        $du = $var(zte_response_dest);
-        xlog("L_INFO", "Redirecting $rs failure directly to ZTE: $du\n");
-    }
 
     # Log the failure reason if available
     if (search("^Reason:")) {
@@ -991,7 +987,15 @@ failure_route[VN_FAILURE_ROUTE] {
     route(NATMANAGE);
 
     xlog("L_INFO", "Forwarding failure $rs $rr upstream\n");
+
+    # Continue with default failure handling
+    # (Kamailio will forward the failure upstream automatically)
 }
+
+
+
+
+
 
 
 #--------------------------------------  VN END--------------------------
@@ -1498,3 +1502,5 @@ failure_route[MANAGE_FAILURE] {
         }
 #!endif
 }
+
+
